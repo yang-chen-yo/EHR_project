@@ -46,7 +46,7 @@ def load_mappings():
 
     return condition_dict, procedure_dict, drug_dict
 
-def load_dataset(load_processed: bool, dataset: str, task: str):
+def load_mimic4_dataset(load_processed: bool, dataset: str, task: str):
     """
     Load or build PyHealth MIMIC-IV sample dataset, and save per-task cache.
     Args:
@@ -74,7 +74,7 @@ def load_dataset(load_processed: bool, dataset: str, task: str):
             "ICD10CM": "CCSCM",
             "ICD10PROC": "CCSPROC"
         },
-        dev=False
+        dev=True
     )
 
     # 選擇對應任務函式

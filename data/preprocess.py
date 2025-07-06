@@ -1,5 +1,3 @@
-# data/preprocess.py
-
 import numpy as np
 import torch
 from pyhealth.tokenizer import Tokenizer
@@ -30,7 +28,6 @@ def prepare_label(sample_dataset, drugs):
     """
     Prepare multi-hot label for drug recommendation.
     """
-    # 用所有可能的 drugs 建立字典
     tokenizer = Tokenizer(sample_dataset.get_all_tokens(key='drugs'))
     indices = tokenizer.convert_tokens_to_indices(drugs)
     num_labels = tokenizer.get_vocabulary_size()
@@ -52,13 +49,21 @@ def pad_and_convert(visits, max_visits, max_nodes):
     reversed in time (most recent first) and padded with zeros.
     """
     padded = []
-    # 1) 反序：最近訪視在前
     for codes in reversed(visits):
         vec = torch.zeros(max_nodes, dtype=torch.float)
         for code in codes:
             vec[code] = 1
         padded.append(vec)
-    # 2) 補零至固定長度
     while len(padded) < max_visits:
         padded.append(torch.zeros(max_nodes, dtype=torch.float))
     return torch.stack(padded, dim=0)
+
+def preprocess_samples(dataset):
+    """
+    Preprocess all samples in the given dataset (iterable) and return a list.
+    """
+    samples = []
+    for record in tqdm(dataset, desc="Preprocessing samples"):
+        samples.append(record)
+    return samples
+
