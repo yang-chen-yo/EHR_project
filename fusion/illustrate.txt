@@ -1,0 +1,9 @@
+| 參數               | 說明                                 |
+| ---------------- | ---------------------------------- |
+| K\_UMLS          | UMLS top-k 檢索數量                    |
+| K\_PUBMED        | PubMed top-k 檢索數量                  |
+| DECAY\_LAMBDA    | 時間衰減率 λ，在 `w = exp(-λ·Δyear)` 中使用  |
+| ALPHA\_SIM       | 相似度在最終分數中的權重 (`alpha * sim`)       |
+| BETA\_RECENCY    | 發表年份權重在最終分數中的權重 (`beta * recency`) |
+| RAG\_MODEL\_NAME | Hugging Face 上用於 RAG 抽取的 LLM 模型名稱  |
+| RAG\_MAX\_TOKENS | LLM 生成時的 `max_new_tokens` 上限       |

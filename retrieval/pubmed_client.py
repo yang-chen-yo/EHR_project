@@ -1,87 +1,116 @@
-import os
+from __future__ import annotations
+
 import time
+import xml.etree.ElementTree as ET
+from typing import List, Dict, Optional
+
 import requests
-from typing import List, Dict
-from config import DATA_BASE_PATH
+
+__all__ = [
+    "PubMedClient",
+    "search_pubmed",
+]
+
 
 class PubMedClient:
-    """
-    使用 NCBI E-utilities 透過 API 檢索 PubMed 文獻摘要
-    - 預設速率限制: 約3次/秒，可透過 sleep_sec 參數調整
-    """
-    BASE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils'
+    """簡易封裝 NCBI E‑utilities (PubMed)。"""
 
-    def __init__(self, email: str):
+    BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+    def __init__(self, email: str, api_key: Optional[str] = None):
+        if not email:
+            raise ValueError("`email` 為必填，以符合 NCBI E‑utilities 使用規範")
         self.email = email
+        self.api_key = api_key
 
-    def search(self, term: str, retmax: int = 5, sleep_sec: float = 0.34) -> List[str]:
-        """
-        依關鍵字搜尋並回傳 PMID 列表
-        Args:
-            term: 搜尋字串
-            retmax: 最多回傳筆數
-            sleep_sec: 呼叫後等待秒數，避免速率過高
-        Returns:
-            List of PMID strings
-        """
+    # ---------------------------------------------------------------------
+    # ESearch：依關鍵字取得 PMID 清單 (JSON 支援)
+    # ---------------------------------------------------------------------
+    def search(
+        self,
+        term: str,
+        *,
+        retmax: int = 5,
+        sleep_sec: float = 0.34,
+    ) -> List[str]:
         params = {
-            'db': 'pubmed',
-            'term': term,
-            'retmax': retmax,
-            'retmode': 'json',
-            'email': self.email
+            "db": "pubmed",
+            "term": term,
+            "retmax": retmax,
+            "retmode": "json",
+            "email": self.email,
         }
-        resp = requests.get(f"{self.BASE_URL}/esearch.fcgi", params=params)
+        if self.api_key:
+            params["api_key"] = self.api_key
+
+        resp = requests.get(f"{self.BASE_URL}/esearch.fcgi", params=params, timeout=20)
         resp.raise_for_status()
-        data = resp.json()
-        pmids = data.get('esearchresult', {}).get('idlist', [])
+        pmids = resp.json().get("esearchresult", {}).get("idlist", [])
         time.sleep(sleep_sec)
         return pmids
 
-    def fetch_abstracts(self, pmids: List[str], sleep_sec: float = 0.34) -> List[Dict[str, str]]:
-        """
-        依 PMID 列表抓取摘要與標題
-        Args:
-            pmids: PMID 列表
-            sleep_sec: 呼叫後等待秒數
-        Returns:
-            List of dicts with keys: pmid, title, abstract
-        """
+    # ---------------------------------------------------------------------
+    # EFetch：依 PMID 抓取 XML，解析標題與摘要
+    # ---------------------------------------------------------------------
+    def fetch_abstracts(
+        self,
+        pmids: List[str],
+        *,
+        sleep_sec: float = 0.34,
+    ) -> List[Dict[str, str]]:
         if not pmids:
             return []
-        ids_str = ','.join(pmids)
+
         params = {
-            'db': 'pubmed',
-            'id': ids_str,
-            'retmode': 'json',
-            'email': self.email
+            "db": "pubmed",
+            "id": ",".join(pmids),
+            "rettype": "abstract",
+            "retmode": "xml",
+            "email": self.email,
         }
-        resp = requests.get(f"{self.BASE_URL}/efetch.fcgi", params=params)
+        if self.api_key:
+            params["api_key"] = self.api_key
+
+        resp = requests.get(f"{self.BASE_URL}/efetch.fcgi", params=params, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
-        uids = data.get('result', {}).get('uids', [])
+        xml_text = resp.text
+
+        # 解析 XML
+        root = ET.fromstring(xml_text)
         articles: List[Dict[str, str]] = []
-        for uid in uids:
-            rec = data['result'].get(uid, {})
-            title = rec.get('title', '').strip()
-            abstract = rec.get('abstract', '')
-            if isinstance(abstract, list):
-                abstract = ' '.join(abstract)
-            articles.append({'pmid': uid, 'title': title, 'abstract': abstract})
+        for art in root.findall(".//PubmedArticle"):
+            pmid = art.findtext(".//PMID") or ""
+            title = (art.findtext(".//ArticleTitle") or "").strip()
+            # 摘要可能分多段 <AbstractText>
+            abstract_parts = [seg.text or "" for seg in art.findall(".//AbstractText")]
+            abstract = ' '.join(part.strip() for part in abstract_parts if part.strip())
+            # 解析出版年份
+            year = art.findtext(".//PubDate/Year") or None
+            if not year:
+                # fallback: 從 PMID 前 4 位嘗試
+                year = pmid[:4] if pmid[:4].isdigit() else None
+            articles.append({"pmid": pmid, "title": title, "abstract": abstract, "year": int(year) if year and year.isdigit() else None})
+
         time.sleep(sleep_sec)
         return articles
 
 
-def search_pubmed(keywords: List[str], email: str) -> List[Dict[str, str]]:
-    """
-    Wrapper: 給定多個 keyword，用 PubMedClient 搜尋並回傳摘要
-    """
-    client = PubMedClient(email=email)
-    results: List[Dict[str, str]] = []
+# -------------------------------------------------------------------------
+# Convenience wrapper：多關鍵字批次搜尋
+# -------------------------------------------------------------------------
+
+def search_pubmed(
+    keywords: List[str],
+    *,
+    email: str,
+    api_key: Optional[str] = None,
+    retmax: int = 5,
+) -> List[Dict[str, str]]:
+    client = PubMedClient(email=email, api_key=api_key)
+    out: List[Dict[str, str]] = []
     for kw in keywords:
-        pmids = client.search(kw)
-        articles = client.fetch_abstracts(pmids)
-        for art in articles:
-            art['keyword'] = kw
-            results.append(art)
-    return results
+        pmids = client.search(kw, retmax=retmax)
+        for art in client.fetch_abstracts(pmids):
+            art["keyword"] = kw
+            out.append(art)
+    return out
