@@ -86,24 +86,26 @@ def merge_to_triples(
 
     triples: List[Triple] = []
 
-    # 1) UMLS → HAS_DISEASE (filter duplicates)
-    seen = set()
-    for hit in fused['umls']:
-        cui = hit['cui']
-        if cui in seen:
+    # 1) UMLS → HAS_DISEASE  --------------------------------------------
+    seen: set[str] = set()
+    for hit in fused["umls"]:
+        cui = hit["cui"]
+        if cui in seen:             # 去重
             continue
         seen.add(cui)
+
         triples.append(
             Triple(
-                head=f"Patient:{patient_id}",
+                head=patient_id,    # 只留純 ID，前綴交由 head_type 記錄
                 head_type="Patient",
                 relation="HAS_DISEASE",
-                tail=f"Disease:{cui}",
+                tail=cui,           # 只留 CUI，本身就是疾病代碼
                 tail_type="Disease",
+                timestamp=None,
                 source="UMLS",
             )
         )
-
+        
     # 2) RAG‐generated PubMed triples
     abstracts = [h['abstract'] for h in fused['pubmed']]
     rag_json = generate_triples_local_llama2(
