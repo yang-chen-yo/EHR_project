@@ -1,5 +1,11 @@
-# === fusion/triple_generation_hf.py ===
+import os
+import sys
+# ensure project root is on sys.path to locate config.py
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import json
+import re
+import textwrap
 from typing import List, Dict, Optional
 
 from config import RAG_MODEL_NAME, RAG_MAX_TOKENS
@@ -15,17 +21,18 @@ def generate_triples_local_llama2(
 ) -> List[Dict]:
     """
     Generate knowledge-graph triples with a quantised chat model.
+    Post-process to strip prefixes from head and tail.
     """
-    # 1) 載入 tokenizer & 模型
+    # 1) Load tokenizer & quantised model
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        load_in_4bit=True,    # 顯存允許就 4bit，否則改 8bit
+        load_in_4bit=True,
         device_map="auto",
         trust_remote_code=True,
     )
 
-    # 2) 建 pipeline
+    # 2) Build text-generation pipeline (only new text)
     generator = pipeline(
         "text-generation",
         model=model,
@@ -33,98 +40,95 @@ def generate_triples_local_llama2(
         max_new_tokens=max_new_tokens,
         do_sample=False,
         temperature=0.0,
+        return_full_text=False,
+        # Add stop sequence to end at closing fence
+        
     )
 
-    # 3) 構造 Prompt：強制 JSON block 並加上 few-shot 範例
+    # 3) Construct Prompt
     abstracts_str = "\n---\n".join(abstracts)
     umls_fact_str = "\n".join(umls_facts or [])
     prompt = f"""
-SYSTEM: You are a medical knowledge-graph extraction assistant.  
-Given a single patient context, UMLS related facts, and PubMed abstract snippets,  
-output ONLY a JSON array of triples, wrapped inside ```json``` fences—nothing else.
+SYSTEM:
+You are a Medical KG Extraction Assistant.
+Use both the patient’s EHR context and the provided PubMed abstracts
+to infer **all** relevant entity–relation triples.
 
-USER: Patient Context and Timeline:
+IMPORTANT:
+- **Do NOT** include any extra labels or text such as "INFERRED TRIPLES".
+- **Only** output a ```json``` code fence.
+- **Make sure** the JSON array is complete and properly closed with `]`.
+
+USER INPUT (do NOT modify):
+Patient Context:
 {patient_context}
 
-UMLS Related Facts:
-{umls_fact_str}
----
-PubMed Abstract Snippets:
+PubMed Abstracts:
 {abstracts_str}
 
-REQUIRED ENTITY TYPES: Patient, Disease, Drug, Symptom, LabResult, Treatment, SideEffect, Severity  
-REQUIRED RELATION TYPES:
-  - HAS_DISEASE (patient→disease)  
-  - USED_DRUG (patient→drug)  
-  - TREATS (drug→disease)  
-  - CAUSES_SIDE_EFFECT (drug→sideEffect)  
-  - HAS_SYMPTOM (disease→symptom)  
-  - HAS_LAB_RESULT (patient→labResult)  
-  - RECEIVED_TREATMENT (patient→treatment)  
-  - BEFORE / AFTER (time ordering)  
+ENTITY TYPES: Patient, Disease, Drug, Symptom, LabResult, Treatment, SideEffect, Severity
+RELATION TYPES: HAS_DISEASE, USED_DRUG, TREATS, CAUSES_SIDE_EFFECT, HAS_SYMPTOM, HAS_LAB_RESULT, RECEIVED_TREATMENT, BEFORE, AFTER
 
-Example of desired output format:
+INFERENCE REQUIREMENTS:
+1. Combine EHR & abstracts—do **not** copy example values.
+2. There **may be multiple** triples; include **all** you can infer.
+3. Each triple must set "source" to "EHR" or "PubMed".
+4. Order triples by timestamp if available.
+
+FORMAT EXAMPLE (placeholders only—do NOT copy values):
 ```json
 [
-  {
-    "head":"Patient:P123456",
-    "head_type":"Patient",
-    "relation":"HAS_DISEASE",
-    "tail":"Disease:I10",
-    "tail_type":"Disease",
-    "timestamp":"2025-06-01",
-    "source":"EHR"
-  },
-  {
-    "head":"Patient:P123456",
-    "head_type":"Patient",
-    "relation":"USED_DRUG",
-    "tail":"Drug:C09AA02",
-    "tail_type":"Drug",
-    "timestamp":"2025-07-10",
-    "source":"EHR"
-  }
-]"""
+  {{
+    "head": "<PatientID>",
+    "head_type": "Patient",
+    "relation": "<RELATION>",
+    "tail": "<Code_or_Value>",
+    "tail_type": "<EntityType>",
+    "timestamp": "<YYYY-MM-DD>",
+    "source": "<EHR_or_PubMed>"
+  }}
+]
+```"""
 
-    # 4) 生成並解析
+    # 4) Generate raw output
     raw = generator(prompt)[0]["generated_text"]
 
-    # 先統一還原雙大括號，之後再做正則比對
-    cleaned = raw.replace("{{", "{").replace("}}", "}")
+    # 5) Extract JSON array by finding first '[' and last ']'
+    start = raw.find('[')
+    end = raw.rfind(']')
+    if start == -1 or end == -1 or end <= start:
+        print("[RAW OUTPUT]", raw)
+        raise ValueError("Model did not return a complete JSON array of triples")
+    json_str = raw[start:end+1]
 
-    import re, textwrap
-    # 找最後一段 [ { "head": ... } ]   （允許中間有任意換行、空白）
-    matches = re.findall(r"\[\s*{\s*\"head\"[\s\S]*?\]", cleaned)
-    if not matches:
-        print("[RAW OUTPUT]", raw[:300], "...")
-        raise ValueError("Model did not return JSON array of triples")
-
-    json_str = textwrap.dedent(matches[-1])  # 取最後一段結果
+    # 6) Parse JSON
     try:
-        return json.loads(json_str)
+        triples = json.loads(json_str)
     except json.JSONDecodeError as e:
-        print("[RAW OUTPUT]", raw[:300], "...")
-        raise ValueError(f"無法解析 JSON: {e}")
+        print("[RAW OUTPUT]", raw)
+        raise ValueError(f"JSON parsing error: {e}")
+
+    # 7) Post-process: strip prefix before ':' in head and tail
+    cleaned = []
+    for t in triples:
+        h = t.get('head', '')
+        ta = t.get('tail', '')
+        t['head'] = h.split(':', 1)[1] if ':' in h else h
+        t['tail'] = ta.split(':', 1)[1] if ':' in ta else ta
+        cleaned.append(t)
+    return cleaned
 
 
-# ——— Quick CLI test ——————————————————————————
+# Quick CLI Test
 if __name__ == "__main__":
     ctx = (
         "PatientID: P123456; Visit: 2025-06-01; Diagnoses: I10, E11.9; "
         "Medications: 2025-06-02 Lisinopril (C09AA02); "
-        "Labs: BP=150/95, Glu=180 mg/dL; "
-        "SideEffect: Dizziness 2025-06-05; Severity: ICU"
+        "Labs: BP=160/95, Glu=180 mg/dL; SideEffect: Dizziness 2025-06-05; Severity: ICU"
     )
-    abs_list = [
-        "In a randomized trial, lisinopril lowered systolic blood pressure by 15 mmHg...",
-        "Metformin was generally well tolerated; rare episodes of dizziness observed...",
-    ]
-    umls_demo = [
-        "lisinopril may_treat essential hypertension",
-        "metformin may_cause dizziness",
-    ]
-    triples = generate_triples_local_llama2(ctx, abs_list, umls_demo)
-    print("\n=== Triples ===")
+    abs_list = ["Lisinopril lowered BP by 15 mmHg in hypertension patients."]
+    triples = generate_triples_local_llama2(ctx, abs_list, None)
+    print("=== Triples ===")
     for t in triples:
         print(t)
 
