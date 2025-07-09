@@ -82,24 +82,29 @@ def merge_to_triples(
     fused: Dict[str, List],
     patient_context: str,
 ) -> List[Triple]:
-    """Combine EHR-derived UMLS triples with RAG-derived PubMed triples."""
+    """Combine EHR‐derived UMLS triples with RAG‐derived PubMed triples."""
 
     triples: List[Triple] = []
 
-    # 1) UMLS → HAS_DISEASE
+    # 1) UMLS → HAS_DISEASE (filter duplicates)
+    seen = set()
     for hit in fused['umls']:
+        cui = hit['cui']
+        if cui in seen:
+            continue
+        seen.add(cui)
         triples.append(
             Triple(
                 head=f"Patient:{patient_id}",
                 head_type="Patient",
                 relation="HAS_DISEASE",
-                tail=f"Disease:{hit['cui']}",
+                tail=f"Disease:{cui}",
                 tail_type="Disease",
                 source="UMLS",
             )
         )
 
-    # 2) RAG-generated PubMed triples
+    # 2) RAG‐generated PubMed triples
     abstracts = [h['abstract'] for h in fused['pubmed']]
     rag_json = generate_triples_local_llama2(
         patient_context=patient_context,
@@ -110,3 +115,4 @@ def merge_to_triples(
         triples.append(Triple(**d))
 
     return triples
+

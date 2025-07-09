@@ -40,6 +40,12 @@ DECAY_LAMBDA = float(os.getenv("DECAY_LAMBDA", 0.1))
 ALPHA_SIM = float(os.getenv("ALPHA_SIM", 0.7))
 BETA_RECENCY = float(os.getenv("BETA_RECENCY", 0.3))
 
+# === Gemini 嵌入模型設定 ===
+GOOGLE_API_KEY = "AIzaSyDID8ktEZOsviITdt6QBUUMbbOb69i46Zk"
+EMBED_MODEL_NAME = "text-embedding-004"  # 或  gemini-embedding-exp-03-07 也可
+EMBED_BATCH_SIZE = 32
+EMBED_TASK_TYPE = "RETRIEVAL_QUERY"  # 查詢用途
+
 # RAG 模型設定
-RAG_MODEL_NAME = os.getenv("RAG_MODEL_NAME", "meta-llama/Llama-2-7b-chat-hf")
-RAG_MAX_TOKENS = int(os.getenv("RAG_MAX_TOKENS", 512))
+RAG_MODEL_NAME = os.getenv("RAG_MODEL_NAME", "huggingFaceH4/zephyr-7b-beta")
+RAG_MAX_TOKENS = int(os.getenv("RAG_MAX_TOKENS", 256))

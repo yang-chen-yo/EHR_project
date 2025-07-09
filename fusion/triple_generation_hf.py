@@ -1,6 +1,7 @@
-#fusion/triple_generation_hf
+# === fusion/triple_generation_hf.py ===
 import json
 from typing import List, Dict, Optional
+
 from config import RAG_MODEL_NAME, RAG_MAX_TOKENS
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
@@ -13,27 +14,18 @@ def generate_triples_local_llama2(
     max_new_tokens: int = RAG_MAX_TOKENS,
 ) -> List[Dict]:
     """
-    Generate knowledge-graph triples using an int8-quantised Llama-2 chat model.
-
-    Args:
-      patient_context: English free-text of patient timeline.
-      abstracts: List of PubMed abstract snippets.
-      umls_facts: Optional UMLS fact strings.
-      model_name: Model identifier from config.
-      max_new_tokens: Generation length limit from config.
-
-    Returns:
-      List of dict triples with keys: head, head_type, relation, tail, tail_type, timestamp, source.
+    Generate knowledge-graph triples with a quantised chat model.
     """
-    # 1) Load tokenizer and quantised model
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # 1) 載入 tokenizer & 模型
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        load_in_8bit=True,
+        load_in_4bit=True,    # 顯存允許就 4bit，否則改 8bit
         device_map="auto",
+        trust_remote_code=True,
     )
 
-    # 2) Create text-generation pipeline
+    # 2) 建 pipeline
     generator = pipeline(
         "text-generation",
         model=model,
@@ -43,12 +35,13 @@ def generate_triples_local_llama2(
         temperature=0.0,
     )
 
-    # 3) Construct prompt
+    # 3) 構造 Prompt：強制 JSON block 並加上 few-shot 範例
     abstracts_str = "\n---\n".join(abstracts)
     umls_fact_str = "\n".join(umls_facts or [])
-
     prompt = f"""
-SYSTEM: You are a medical knowledge-graph extraction assistant. Given a single patient context, UMLS related facts, and PubMed abstract snippets, output ONLY a JSON array of triples.
+SYSTEM: You are a medical knowledge-graph extraction assistant.  
+Given a single patient context, UMLS related facts, and PubMed abstract snippets,  
+output ONLY a JSON array of triples, wrapped inside ```json``` fences—nothing else.
 
 USER: Patient Context and Timeline:
 {patient_context}
@@ -59,28 +52,67 @@ UMLS Related Facts:
 PubMed Abstract Snippets:
 {abstracts_str}
 
-REQUIRED ENTITY TYPES: [Patient, Disease, Drug, Symptom, LabResult, Treatment, SideEffect, Severity]
-REQUIRED RELATION TYPES: [HAS_DISEASE, USED_DRUG, TREATS, CAUSES_SIDE_EFFECT, HAS_SYMPTOM, HAS_LAB_RESULT, RECEIVED_TREATMENT, HAS_SEVERITY, BEFORE, AFTER]
-OUTPUT FORMAT: JSON array with keys: head, head_type, relation, tail, tail_type, timestamp (optional), source.
-Example:
+REQUIRED ENTITY TYPES: Patient, Disease, Drug, Symptom, LabResult, Treatment, SideEffect, Severity  
+REQUIRED RELATION TYPES:
+  - HAS_DISEASE (patient→disease)  
+  - USED_DRUG (patient→drug)  
+  - TREATS (drug→disease)  
+  - CAUSES_SIDE_EFFECT (drug→sideEffect)  
+  - HAS_SYMPTOM (disease→symptom)  
+  - HAS_LAB_RESULT (patient→labResult)  
+  - RECEIVED_TREATMENT (patient→treatment)  
+  - BEFORE / AFTER (time ordering)  
+
+Example of desired output format:
+```json
 [
-  {"head":"Patient:P123456", "head_type":"Patient", "relation":"HAS_DISEASE", "tail":"Disease:I10", "tail_type":"Disease", "timestamp":"2025-06-01", "source":"EHR"}
-]
-"""
+  {
+    "head":"Patient:P123456",
+    "head_type":"Patient",
+    "relation":"HAS_DISEASE",
+    "tail":"Disease:I10",
+    "tail_type":"Disease",
+    "timestamp":"2025-06-01",
+    "source":"EHR"
+  },
+  {
+    "head":"Patient:P123456",
+    "head_type":"Patient",
+    "relation":"USED_DRUG",
+    "tail":"Drug:C09AA02",
+    "tail_type":"Drug",
+    "timestamp":"2025-07-10",
+    "source":"EHR"
+  }
+]"""
 
-    # 4) Generate and parse
+    # 4) 生成並解析
     raw = generator(prompt)[0]["generated_text"]
-    start = raw.find("[")
-    if start == -1:
+
+    # 先統一還原雙大括號，之後再做正則比對
+    cleaned = raw.replace("{{", "{").replace("}}", "}")
+
+    import re, textwrap
+    # 找最後一段 [ { "head": ... } ]   （允許中間有任意換行、空白）
+    matches = re.findall(r"\[\s*{\s*\"head\"[\s\S]*?\]", cleaned)
+    if not matches:
+        print("[RAW OUTPUT]", raw[:300], "...")
         raise ValueError("Model did not return JSON array of triples")
-    return json.loads(raw[start:])
+
+    json_str = textwrap.dedent(matches[-1])  # 取最後一段結果
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        print("[RAW OUTPUT]", raw[:300], "...")
+        raise ValueError(f"無法解析 JSON: {e}")
 
 
-# Quick test
+# ——— Quick CLI test ——————————————————————————
 if __name__ == "__main__":
     ctx = (
         "PatientID: P123456; Visit: 2025-06-01; Diagnoses: I10, E11.9; "
-        "Medications: 2025-06-02 Lisinopril (C09AA02); Labs: BP=150/95, Glu=180 mg/dL; "
+        "Medications: 2025-06-02 Lisinopril (C09AA02); "
+        "Labs: BP=150/95, Glu=180 mg/dL; "
         "SideEffect: Dizziness 2025-06-05; Severity: ICU"
     )
     abs_list = [
@@ -92,5 +124,7 @@ if __name__ == "__main__":
         "metformin may_cause dizziness",
     ]
     triples = generate_triples_local_llama2(ctx, abs_list, umls_demo)
+    print("\n=== Triples ===")
     for t in triples:
         print(t)
+
