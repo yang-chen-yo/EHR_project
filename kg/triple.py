@@ -2,7 +2,7 @@
 import pickle
 from dataclasses import dataclass
 from typing import Optional, Any, List, Dict
-from config import sample_dataset_path
+import config
 
 # === 知識圖三元組結構 ===
 @dataclass
@@ -68,7 +68,7 @@ def load_preprocessed_samples(dataset: str, task: str) -> List[Dict[str, Any]]:
     Returns:
         List of sample dicts.
     """
-    path = sample_dataset_path(dataset, task)
+    path = config.sample_dataset_path(dataset, task)
     with open(path, 'rb') as f:
         samples = pickle.load(f)
     return samples
