@@ -32,3 +32,14 @@ def sample_dataset_path(dataset: str, task: str) -> str:
     return os.path.join(
         DATA_BASE_PATH, f"sample_dataset_{dataset}_{task}.pkl"
     )
+    
+# Fusion & Scoring 參數
+K_UMLS = int(os.getenv("K_UMLS", 5))
+K_PUBMED = int(os.getenv("K_PUBMED", 5))
+DECAY_LAMBDA = float(os.getenv("DECAY_LAMBDA", 0.1))
+ALPHA_SIM = float(os.getenv("ALPHA_SIM", 0.7))
+BETA_RECENCY = float(os.getenv("BETA_RECENCY", 0.3))
+
+# RAG 模型設定
+RAG_MODEL_NAME = os.getenv("RAG_MODEL_NAME", "meta-llama/Llama-2-7b-chat-hf")
+RAG_MAX_TOKENS = int(os.getenv("RAG_MAX_TOKENS", 512))

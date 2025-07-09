@@ -84,15 +84,20 @@ class PubMedClient:
             title = (art.findtext(".//ArticleTitle") or "").strip()
             # 摘要可能分多段 <AbstractText>
             abstract_parts = [seg.text or "" for seg in art.findall(".//AbstractText")]
-            abstract = " ".join(part.strip() for part in abstract_parts if part.strip())
-            articles.append({"pmid": pmid, "title": title, "abstract": abstract})
+            abstract = ' '.join(part.strip() for part in abstract_parts if part.strip())
+            # 解析出版年份
+            year = art.findtext(".//PubDate/Year") or None
+            if not year:
+                # fallback: 從 PMID 前 4 位嘗試
+                year = pmid[:4] if pmid[:4].isdigit() else None
+            articles.append({"pmid": pmid, "title": title, "abstract": abstract, "year": int(year) if year and year.isdigit() else None})
 
         time.sleep(sleep_sec)
         return articles
 
 
 # -------------------------------------------------------------------------
-# Conveniece wrapper：多關鍵字批次搜尋
+# Convenience wrapper：多關鍵字批次搜尋
 # -------------------------------------------------------------------------
 
 def search_pubmed(
@@ -110,4 +115,3 @@ def search_pubmed(
             art["keyword"] = kw
             out.append(art)
     return out
-
