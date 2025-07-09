@@ -3,35 +3,71 @@ import pickle
 import csv
 from typing import List, Dict
 from config import UMLS_DATA_DIR
-from sparknlp.pretrained import PretrainedPipeline
+
+# Lazy import Spark NLP and pyspark to avoid import errors
+try:
+    import sparknlp
+    from pyspark.sql import SparkSession
+    from sparknlp.pretrained import PretrainedPipeline
+except ImportError:
+    sparknlp = None
+    SparkSession = None
+    PretrainedPipeline = None
 
 
 class UMLSClient:
     """
-    Loader for UMLS static concepts and dynamic ICD10CM→CUI mapping via Spark NLP.
+    Loader for UMLS static concepts and optional dynamic ICD10CM→CUI mapping via Spark NLP.
     同時支援載入 UMLS 關係三元組 (relation triples CSV)。
 
     靜態文件:
-      - concept.txt: CUI 列表
-      - concept_name.txt: CUI→名稱映射
-      - relation.txt: 關係類型列表
-      - umls.csv: 關係三元組，每行 'relation\tCUI1\tCUI2\tweight'
-    並將解析結果快取至 pickle 加速後續載入。
+      - concept.txt
+      - concept_name.txt
+      - relation.txt
+      - umls.csv (關係三元組: relation\tCUI1\tCUI2\tweight)
     動態 code→CUI:
-      - 使用 Spark NLP icd10cm_umls_mapping pipeline
+      - 使用 Spark NLP icd10cm_umls_mapping pipeline 或注入自訂 pipeline
     """
 
     def __init__(
         self,
         umls_dir: str = UMLS_DATA_DIR,
         cache_dir: str = None,
-        model: str = "icd10cm_umls_mapping"
+        model: str = "icd10cm_umls_mapping",
+        pipeline: PretrainedPipeline = None
     ):
         self.umls_dir = umls_dir
         self.cache_dir = cache_dir or umls_dir
-        # Spark NLP mapping
-        self.pipeline = PretrainedPipeline(model, lang="en", remote_loc=None)
-        # 靜態資料
+
+        # 如果使用者注入 pipeline，直接使用
+        if pipeline is not None:
+            self.pipeline = pipeline
+            self.spark = None
+        else:
+            # 檢查是否可用 Spark NLP
+            if sparknlp and SparkSession and PretrainedPipeline:
+                try:
+                    spark = SparkSession.builder.getOrCreate()
+                    _ = spark.sparkContext._jsc
+                except Exception:
+                    try:
+                        spark = sparknlp.start()
+                    except Exception:
+                        spark = None
+                if spark:
+                    self.spark = spark
+                    try:
+                        self.pipeline = PretrainedPipeline(model, lang="en", remote_loc=None)
+                    except Exception:
+                        self.pipeline = None
+                else:
+                    self.spark = None
+                    self.pipeline = None
+            else:
+                self.spark = None
+                self.pipeline = None
+
+        # 載入靜態 UMLS 資料
         self.concepts = self._load_concepts()
         self.concept_names = self._load_concept_names()
         self.relation_types = self._load_relation_types()
@@ -114,9 +150,11 @@ class UMLSClient:
 
     def query_by_codes(self, codes: List[str]) -> List[Dict[str, str]]:
         """
-        給定 ICD-10CM codes list，使用 Spark NLP mapping pipeline 轉成 UMLS CUIs，
-        並回傳概念名稱列表。
+        給定 ICD-10CM codes list，使用 Spark NLP mapping pipeline 轉成 UMLS CUIs，並回傳概念名稱。
+        若 pipeline 為 None，拋出 ImportError。
         """
+        if not self.pipeline:
+            raise ImportError("Spark NLP Pipeline 未初始化，無法執行 code→CUI 映射。")
         results: List[Dict[str, str]] = []
         doc = self.pipeline.annotate(" ".join(codes))
         icd_list = doc.get('icd10cm', [])
@@ -128,18 +166,14 @@ class UMLSClient:
         return results
 
     def query_relations(self, cui: str) -> List[Dict[str, object]]:
-        """
-        查詢給定 CUI 的所有關係三元組 (向前/向後)。
-        回傳格式: [{'relation','cui1','cui2','weight'}, ...]
-        """
         return [t for t in self.relation_triples if t['cui1'] == cui or t['cui2'] == cui]
 
 
-def query_umls(
-    codes: List[str],
-    umls_dir: str = None,
-    model: str = None
-) -> List[Dict[str, str]]:
+def query_umls(codes, umls_dir=None, model=None):
+    """
+    Wrapper: 使用 UMLSClient 查詢 ICD-10CM codes 對應的 UMLS CUIs.
+    """
     umls_dir = umls_dir or UMLS_DATA_DIR
     client = UMLSClient(umls_dir=umls_dir)
     return client.query_by_codes(codes)
+

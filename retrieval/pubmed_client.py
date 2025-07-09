@@ -1,3 +1,4 @@
+# === retrieval/pubmed_client.py ===
 from __future__ import annotations
 
 import time
@@ -13,7 +14,7 @@ __all__ = [
 
 
 class PubMedClient:
-    """簡易封裝 NCBI E‑utilities (PubMed)。"""
+    """簡易封裝 NCBI E‑utilities (PubMed)。"""
 
     BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
