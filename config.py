@@ -48,4 +48,4 @@ EMBED_TASK_TYPE = "RETRIEVAL_QUERY"  # 查詢用途
 
 # RAG 模型設定
 RAG_MODEL_NAME = os.getenv("RAG_MODEL_NAME", "huggingFaceH4/zephyr-7b-beta")
-RAG_MAX_TOKENS = int(os.getenv("RAG_MAX_TOKENS", 256))
+RAG_MAX_TOKENS = int(os.getenv("RAG_MAX_TOKENS", 2048))
