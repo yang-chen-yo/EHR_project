@@ -52,12 +52,13 @@ def generate_triples_local_llama2(
 SYSTEM:
 You are a Medical KG Extraction Assistant.
 Use both the patient’s EHR context and the provided PubMed abstracts
-to infer **all** relevant entity–relation triples.
+to infer **all** relevant entity–relation triples.  
 
-IMPORTANT:
-- **Do NOT** include any extra labels or text such as "INFERRED TRIPLES".
-- **Only** output a ```json``` code fence.
-- **Make sure** the JSON array is complete and properly closed with `]`.
+OUTPUT RULES:
+- **Only** return a ```json``` code fence containing a JSON array of objects.
+- **Do NOT** output any other text outside the code fence.
+- The array **may contain multiple** objects—one per inferred triple.
+- Each object must include: head, head_type, relation, tail, tail_type, timestamp (optional), source.
 
 USER INPUT (do NOT modify):
 Patient Context:
@@ -66,31 +67,56 @@ Patient Context:
 PubMed Abstracts:
 {abstracts_str}
 
-ENTITY TYPES: Patient, Disease, Drug, Symptom, LabResult, Treatment, SideEffect, Severity
-RELATION TYPES: HAS_DISEASE, USED_DRUG, TREATS, CAUSES_SIDE_EFFECT, HAS_SYMPTOM, HAS_LAB_RESULT, RECEIVED_TREATMENT, BEFORE, AFTER
+ENTITY TYPES (nodes):
+- Patient          # 病患ID
+- Disease          # 疾病
+- Drug             # 藥物
+- Symptom          # 臨床症狀
+- LabResult        # 實驗室檢驗結果（含單位）
+- Treatment        # 治療方案（如手術／化療／放療）
+- SideEffect       # 藥物副作用／不良反應
+- Severity         # 病情嚴重度（如 ICU / 住院 / 門診）
+
+RELATION TYPES (edges):
+- HAS_DISEASE            (patient → disease)
+- USED_DRUG              (patient → drug)
+- TREATS                 (drug → disease)
+- CAUSES_SIDE_EFFECT     (drug → sideEffect)
+- HAS_SYMPTOM            (disease → symptom)
+- HAS_LAB_RESULT         (patient → labResult)
+- RECEIVED_TREATMENT     (patient → treatment)
+- BEFORE / AFTER         (time ordering)
 
 INFERENCE REQUIREMENTS:
-1. Combine EHR & abstracts—do **not** copy example values.
-2. There **may be multiple** triples; include **all** you can infer.
-3. Each triple must set "source" to "EHR" or "PubMed".
-4. Order triples by timestamp if available.
+1. Use **both** EHR and abstracts to infer triples—do **not** copy values from the Example.
+2. There **may be multiple** triples for one patient; include **all** you can infer.
+3. Each triple must set `"source":"EHR"` or `"source":"PubMed"`.
+4. If a value (e.g. lab number) appears in both EHR and PubMed, choose the most specific one.
 
-FORMAT EXAMPLE (placeholders only—do NOT copy values):
+FORMAT EXAMPLE (placeholders only—do NOT copy these values):
 ```json
 [
-  {{
-    "head": "<PatientID>",
+  {
+    "head": "Patient:<PatientID>",
     "head_type": "Patient",
     "relation": "<RELATION>",
-    "tail": "<Code_or_Value>",
+    "tail": "<EntityType>:<Code_or_Name_or_Value>",
     "tail_type": "<EntityType>",
     "timestamp": "<YYYY-MM-DD>",
     "source": "<EHR_or_PubMed>"
-  }}
-]
-```"""
+  },
+  {
+    "head": "Patient:<PatientID>",
+    "head_type": "Patient",
+    "relation": "<RELATION>",
+    "tail": "<EntityType>:<Code_or_Name_or_Value>",
+    "tail_type": "<EntityType>",
+    "timestamp": "<YYYY-MM-DD>",
+    "source": "<EHR_or_PubMed>"
+  }
+]"""
 
-    # 4) Generate raw output
+    # 4) 生成並解析
     raw = generator(prompt)[0]["generated_text"]
 
     # 5) Extract JSON array by finding first '[' and last ']'

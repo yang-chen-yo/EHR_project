@@ -1,6 +1,6 @@
-#fusion/merger.py
 from typing import List, Dict
 from datetime import datetime
+import os, json
 
 from config import K_UMLS, K_PUBMED
 from embed.encoder import Encoder
@@ -16,105 +16,107 @@ def fuse_and_score(
     patient_text: str,
     umls_dir: str,
     pubmed_email: str,
+    patient_fields: Dict[str, list],
     k_umls: int = K_UMLS,
     k_pubmed: int = K_PUBMED,
 ) -> Dict[str, List]:
-    """Vector‐based retrieval on UMLS and PubMed.
+    """
+    向量化 UMLS + PubMed 檢索，並計算各自邊權重。
 
-    Returns a dict with keys:
-        'umls':   List[{'cui','name','score'}],
-        'pubmed': List[{'pmid','title','abstract','score','year'}],
-        'umls_facts': List[str]
+    Returns:
+      {
+        'umls':   List[{'cui','name','score'}],  # score 為 cosine 相似度
+        'pubmed': List[{'pmid','title','abstract','score','year'}],  # score 為 sim×recency
+      }
     """
     encoder = Encoder()
     qvec = encoder.encode([patient_text])[0]
 
-    # ── UMLS retrieval ───────────
+    # UMLS
     client_u = UMLSClient(umls_dir)
-    cuis = client_u.concepts
+    cuis  = client_u.concepts
     names = [client_u.concept_names[c] for c in cuis]
     name_vecs = encoder.encode(names)
-
     idx_u = FaissIndex(name_vecs.shape[1])
     idx_u.build(name_vecs)
     ids_u, sims_u = idx_u.search(qvec, k_umls)
-
     umls_hits = [
-        {'cui': cuis[i], 'name': names[i], 'score': float(sims_u[j])}
-        for j, i in enumerate(ids_u)
+        {'cui':cuis[i], 'name':names[i], 'score':float(sims_u[j])}
+        for j,i in enumerate(ids_u)
     ]
 
-    # Build plain-text UMLS facts (max 2 per hit)
-    umls_facts: List[str] = []
-    for hit in umls_hits:
-        cui = hit['cui']
-        facts = [t for t in client_u.relation_triples if t['cui1'] == cui or t['cui2'] == cui][:2]
-        for t in facts:
-            h_name = client_u.concept_names.get(t['cui1'], t['cui1'])
-            rel = t['relation']
-            t_name = client_u.concept_names.get(t['cui2'], t['cui2'])
-            umls_facts.append(f"{h_name} {rel} {t_name}")
-
-    # ── PubMed retrieval ─────────
+    # PubMed: 根據患者字段逐 concept 檢索
     client_p = PubMedClient(email=pubmed_email)
-    pmids = client_p.search(patient_text, retmax=k_pubmed)
-    arts = client_p.fetch_abstracts(pmids)
+    topics = []
+    for field in ('conditions','procedures','drugs'):
+        for sub in patient_fields.get(field,[]):
+            topics += [c['name'] for c in sub]
+
+    all_pmids = []
+    for name in topics:
+        all_pmids += client_p.search(name, retmax=k_pubmed)
+    all_pmids = list(dict.fromkeys(all_pmids))[: k_pubmed*max(len(topics),1)]
+    arts = client_p.fetch_abstracts(all_pmids)
 
     pubmed_hits = []
     for art in arts:
         vec = encoder.encode([art['abstract']])[0]
         sim = cosine_similarity(qvec, vec)
-        year = art.get('year') or datetime.now().year
-        score = score_pubmed_hit(sim, year)
-        pubmed_hits.append({**art, 'score': score})
-
+        score = score_pubmed_hit(sim, art.get('year') or datetime.now().year)
+        pubmed_hits.append({**art, 'score':score})
     pubmed_hits.sort(key=lambda x: x['score'], reverse=True)
 
-    return {
-        'umls': umls_hits,
-        'pubmed': pubmed_hits,
-        'umls_facts': umls_facts,
-    }
+    return {'umls':umls_hits,'pubmed':pubmed_hits}
 
 
 def merge_to_triples(
     patient_id: str,
     fused: Dict[str, List],
     patient_context: str,
+    patient_fields: Dict[str, list],
+    output_dir: str = 'triples_output',
+    accumulate: bool = True,
 ) -> List[Triple]:
-    """Combine EHR‐derived UMLS triples with RAG‐derived PubMed triples."""
+    """
+    合併 UMLS 與 RAG(PubMed) 三元組，並將邊權重寫入 Triple.weight。
 
+    若 accumulate=True，則回傳包含所有 Triple 的 list；
+    否則僅寫檔不回傳。
+    """
+    os.makedirs(os.path.join(output_dir, patient_id), exist_ok=True)
     triples: List[Triple] = []
 
-    # 1) UMLS → HAS_DISEASE  --------------------------------------------
-    seen: set[str] = set()
-    for hit in fused["umls"]:
-        cui = hit["cui"]
-        if cui in seen:             # 去重
-            continue
-        seen.add(cui)
-
+    # UMLS 三元組 + weight
+    for hit in fused['umls']:
         triples.append(
             Triple(
-                head=patient_id,    # 只留純 ID，前綴交由 head_type 記錄
-                head_type="Patient",
-                relation="HAS_DISEASE",
-                tail=cui,           # 只留 CUI，本身就是疾病代碼
-                tail_type="Disease",
-                timestamp=None,
-                source="UMLS",
+                head=patient_id, head_type='Patient',
+                relation='HAS_DISEASE', tail=hit['cui'], tail_type='Disease',
+                source='UMLS', weight=hit['score']
             )
         )
-        
-    # 2) RAG‐generated PubMed triples
+
+    # RAG 三元組 + weight (取首篇摘要最高 score)
+    best_score = fused['pubmed'][0]['score'] if fused['pubmed'] else None
     abstracts = [h['abstract'] for h in fused['pubmed']]
-    rag_json = generate_triples_local_llama2(
+    rag_list = generate_triples_local_llama2(
         patient_context=patient_context,
         abstracts=abstracts,
-        umls_facts=fused['umls_facts'],
+        umls_facts=None
     )
-    for d in rag_json:
-        triples.append(Triple(**d))
+    for item in rag_list:
+        triples.append(
+            Triple(
+                head=item['head'], head_type=item['head_type'],
+                relation=item['relation'], tail=item['tail'], tail_type=item['tail_type'],
+                timestamp=item.get('timestamp'), source='PubMed', weight=best_score
+            )
+        )
+        if accumulate:
+            # 可選：將每個 concept 的 RAG 輸出另存檔案
+            pdir = os.path.join(output_dir, patient_id)
+            fname = f"{item['relation']}_{item['tail']}.json"
+            with open(os.path.join(pdir, fname),'w',encoding='utf-8') as f:
+                json.dump(item,f,ensure_ascii=False,indent=2)
 
-    return triples
-
+    return triples if accumulate else []

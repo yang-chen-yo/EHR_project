@@ -46,6 +46,30 @@ def load_mappings():
 
     return condition_dict, procedure_dict, drug_dict
 
+def enrich_sample_with_names(sample: dict,
+                             cond_map: dict,
+                             proc_map: dict,
+                             drug_map: dict) -> dict:
+    """
+    將 sample 內的 conditions / procedures / drugs
+    由 [['151','6',...], [...]] 轉成
+    [[{'code':'151','name':'Essential hypertension'}, ...], [...]]
+    """
+    def _convert(nested_codes: List[List[str]], mapping: dict):
+        enriched = []
+        for code_list in nested_codes:
+            enriched.append([
+                {"code": c, "name": mapping.get(c, c).title()}
+                for c in code_list
+            ])
+        return enriched
+
+    sample["conditions"] = _convert(sample["conditions"], cond_map)
+    sample["procedures"] = _convert(sample["procedures"], proc_map)
+    sample["drugs"]      = _convert(sample["drugs"],      drug_map)
+    return sample
+
+
 def load_mimic4_dataset(load_processed: bool, dataset: str, task: str):
     """
     Load or build PyHealth MIMIC-IV sample dataset, and save per-task cache.

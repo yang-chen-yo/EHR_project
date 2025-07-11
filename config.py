@@ -35,7 +35,7 @@ def sample_dataset_path(dataset: str, task: str) -> str:
     
 # Fusion & Scoring 參數
 K_UMLS = int(os.getenv("K_UMLS", 5))
-K_PUBMED = int(os.getenv("K_PUBMED", 5))
+K_PUBMED = int(os.getenv("K_PUBMED", 3))
 DECAY_LAMBDA = float(os.getenv("DECAY_LAMBDA", 0.1))
 ALPHA_SIM = float(os.getenv("ALPHA_SIM", 0.7))
 BETA_RECENCY = float(os.getenv("BETA_RECENCY", 0.3))
