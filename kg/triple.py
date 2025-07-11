@@ -1,4 +1,4 @@
-#kg/triple.py
+# kg/triple.py
 import pickle
 from dataclasses import dataclass
 from typing import Optional, Any, List, Dict
@@ -14,6 +14,7 @@ class Triple:
     tail_type: str
     timestamp: Optional[str] = None
     source: str = "EHR"
+    weight: Optional[float] = None    # 新增欄位，用於存放邊權重
 
 
 def samples_to_triples(samples: List[Dict[str, Any]]) -> List[Triple]:
@@ -39,21 +40,24 @@ def samples_to_triples(samples: List[Dict[str, Any]]) -> List[Triple]:
             triples.append(Triple(
                 head=f"Patient:{pid}", head_type="Patient",
                 relation="HAS_DISEASE", tail=f"Disease:{cond}", tail_type="Disease",
-                timestamp=visit_time, source="EHR"
+                timestamp=visit_time, source="EHR",
+                weight=None             # EHR 邊預設無權重，可另行設定
             ))
         # Patient - Drug
         for drug in rec.get('drugs', []):
             triples.append(Triple(
                 head=f"Patient:{pid}", head_type="Patient",
                 relation="USED_DRUG", tail=f"Drug:{drug}", tail_type="Drug",
-                timestamp=visit_time, source="EHR"
+                timestamp=visit_time, source="EHR",
+                weight=None
             ))
         # Patient - Treatment (procedures)
         for proc in rec.get('procedures', []):
             triples.append(Triple(
                 head=f"Patient:{pid}", head_type="Patient",
                 relation="RECEIVED_TREATMENT", tail=f"Treatment:{proc}", tail_type="Treatment",
-                timestamp=visit_time, source="EHR"
+                timestamp=visit_time, source="EHR",
+                weight=None
             ))
     return triples
 
