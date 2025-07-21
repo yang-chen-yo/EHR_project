@@ -1,160 +1,187 @@
-import os
-import sys
-# ensure project root is on sys.path to locate config.py
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import json
 import re
-import textwrap
-from typing import List, Dict, Optional
+import time
+from typing import List, Dict
+import google.generativeai as genai
+from google.api_core.exceptions import GoogleAPIError
 
-from config import RAG_MODEL_NAME, RAG_MAX_TOKENS
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+# ★★ 事先配置你的 API Key ★★
+genai.configure(api_key="AIzaSyCew69BjF4VwjlbqTZMbOAK27jjvU24EBI")
+MODEL_ID = "gemma-3-4b-it"
 
 
-def generate_triples_local_llama2(
+def _sanitize_raw(text: str) -> str:
+    # 清理常見 JSON 格式錯誤
+    text = text.strip()
+    # 移除 code fence
+    text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    # 分號轉逗號（key/value 之間用逗號）
+    text = re.sub(r';\s*(?=")', ',', text)
+    # 修正多重冒號
+    text = re.sub(r'::', ':', text)
+    # 取代 head/tail 嵌錯
+    text = re.sub(r'"(head|tail)"\s*:\s*"(\w+)"\s*:\s*"', r'"\1": "\2:', text)
+    # 移除多餘屬性或標籤
+    text = re.sub(r'"([^"\n]+:[^"\n]+)"\s*:\s*"<[^">]+>"', r'"\1"', text)
+    text = re.sub(r'"([^"\n]+:[^"\n]+)"\s*:\s*"[^"]+"', r'"\1"', text)
+    # 修正 source 標記
+    text = re.sub(r'"source"\s*:\s*"(Patient Context|PubMed Abstracts)"', '"source": "RAG"', text)
+    # 移除物件/陣列尾逗號
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+
+def _extract_json(raw: str) -> List[Dict]:
+    raw = _sanitize_raw(raw)
+    # 嘗試直接解析
+    try:
+        data = json.loads(raw)
+        data_list = data if isinstance(data, list) else [data]
+    except json.JSONDecodeError:
+        # 分段提取
+        data_list = []
+        for block in re.findall(r"\[[^\]]+\]", raw, flags=re.S):
+            cleaned = _sanitize_raw(block)
+            try:
+                part = json.loads(cleaned)
+                if isinstance(part, list):
+                    data_list.extend(part)
+            except json.JSONDecodeError:
+                continue
+    # 驗證並修正 timestamp
+    valid_list: List[Dict] = []
+    for item in data_list:
+        ts = item.get('timestamp')
+        if ts:
+            try:
+                year = int(ts.split('-')[0])
+                if year < 1900 or year > datetime.now().year:
+                    item['timestamp'] = None
+            except Exception:
+                item['timestamp'] = None
+        valid_list.append(item)
+    return valid_list
+    
+
+def generate_triples_via_gemma(
     patient_context: str,
     abstracts: List[str],
-    umls_facts: Optional[List[str]] = None,
-    model_name: str = RAG_MODEL_NAME,
-    max_new_tokens: int = RAG_MAX_TOKENS,
+    patient_id: str = "",
+    batch_size: int = 5,
+    max_output_tokens: int = 4096,
 ) -> List[Dict]:
     """
-    Generate knowledge-graph triples with a quantised chat model.
-    Post-process to strip prefixes from head and tail.
+    呼叫 Gemini API 產生三元組，並帶 retry 機制
     """
-    # 1) Load tokenizer & quantised model
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        load_in_4bit=True,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    sys_prompt = """You are a Medical Knowledge-Graph Extraction Assistant.
+Use ONLY the information found in the patient EHR context and the PubMed abstracts; do NOT hallucinate or rely on outside knowledge.
 
-    # 2) Build text-generation pipeline (only new text)
-    generator = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        temperature=0.0,
-        return_full_text=False,
-        # Add stop sequence to end at closing fence
-        
-    )
+For EACH abstract, extract EXACTLY 3 triples:
+  1. One whose tail_type is Symptom or LaboratoryResult
+  2. One whose tail_type is Treatment or Procedure
+  3. One whose tail_type is AdverseEffect
 
-    # 3) Construct Prompt
-    abstracts_str = "\n---\n".join(abstracts)
-    umls_fact_str = "\n".join(umls_facts or [])
-    prompt = f"""
-SYSTEM:
-You are a Medical KG Extraction Assistant.
-Use both the patient’s EHR context and the provided PubMed abstracts
-to infer **all** relevant entity–relation triples.  
+Return a SINGLE JSON array of objects, adhering strictly to the following rules:
+1. Output ONLY the raw JSON array—no markdown, no code fences (```), no explanatory text.
+2. Use EXACT wording from the abstracts/EHR for entity strings.
+3. Use exactly ONE colon ':' in each key-value pair—never '::' or multiple colons.
+4. Ensure every object has ALL required fields in the exact order shown below.
+5. Ensure the JSON is valid and properly formatted (e.g., correct brackets, commas, and quotes).
 
-OUTPUT RULES:
-- **Only** return a ```json``` code fence containing a JSON array of objects.
-- **Do NOT** output any other text outside the code fence.
-- The array **may contain multiple** objects—one per inferred triple.
-- Each object must include: head, head_type, relation, tail, tail_type, timestamp (optional), source.
-
-USER INPUT (do NOT modify):
-Patient Context:
-{patient_context}
-
-PubMed Abstracts:
-{abstracts_str}
-
-ENTITY TYPES (nodes):
-- Patient          # 病患ID
-- Disease          # 疾病
-- Drug             # 藥物
-- Symptom          # 臨床症狀
-- LabResult        # 實驗室檢驗結果（含單位）
-- Treatment        # 治療方案（如手術／化療／放療）
-- SideEffect       # 藥物副作用／不良反應
-- Severity         # 病情嚴重度（如 ICU / 住院 / 門診）
-
-RELATION TYPES (edges):
-- HAS_DISEASE            (patient → disease)
-- USED_DRUG              (patient → drug)
-- TREATS                 (drug → disease)
-- CAUSES_SIDE_EFFECT     (drug → sideEffect)
-- HAS_SYMPTOM            (disease → symptom)
-- HAS_LAB_RESULT         (patient → labResult)
-- RECEIVED_TREATMENT     (patient → treatment)
-- BEFORE / AFTER         (time ordering)
-
-INFERENCE REQUIREMENTS:
-1. Use **both** EHR and abstracts to infer triples—do **not** copy values from the Example.
-2. There **may be multiple** triples for one patient; include **all** you can infer.
-3. Each triple must set `"source":"EHR"` or `"source":"PubMed"`.
-4. If a value (e.g. lab number) appears in both EHR and PubMed, choose the most specific one.
-
-FORMAT EXAMPLE (placeholders only—do NOT copy these values):
-```json
+Required schema:
 [
   {
-    "head": "Patient:<PatientID>",
-    "head_type": "Patient",
-    "relation": "<RELATION>",
-    "tail": "<EntityType>:<Code_or_Name_or_Value>",
-    "tail_type": "<EntityType>",
-    "timestamp": "<YYYY-MM-DD>",
-    "source": "<EHR_or_PubMed>"
-  },
-  {
-    "head": "Patient:<PatientID>",
-    "head_type": "Patient",
-    "relation": "<RELATION>",
-    "tail": "<EntityType>:<Code_or_Name_or_Value>",
+    "head": "<EntityType>:<ExactTextFromAbstractOrEHR>",
+    "head_type": "<EntityType>",
+    "relation": "<RelationLabelAsSeen>",
+    "tail": "<EntityType>:<ExactTextFromAbstractOrEHR>",
     "tail_type": "<EntityType>",
     "timestamp": "<YYYY-MM-DD>",
     "source": "<EHR_or_PubMed>"
   }
-]"""
+]
 
-    # 4) 生成並解析
-    raw = generator(prompt)[0]["generated_text"]
+Entity types:
+- Patient • Disease • Drug • Symptom • LaboratoryResult
+- Treatment • Procedure • AdverseEffect • Severity
 
-    # 5) Extract JSON array by finding first '[' and last ']'
-    start = raw.find('[')
-    end = raw.rfind(']')
-    if start == -1 or end == -1 or end <= start:
-        print("[RAW OUTPUT]", raw)
-        raise ValueError("Model did not return a complete JSON array of triples")
-    json_str = raw[start:end+1]
+Relation types:
+- Patient–Disease • Patient–Drug • Disease–Drug • Drug–AdverseEffect
+- Disease–Symptom • Patient–LaboratoryResult • Patient–Treatment • Temporal
 
-    # 6) Parse JSON
-    try:
-        triples = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        print("[RAW OUTPUT]", raw)
-        raise ValueError(f"JSON parsing error: {e}")
+Example (for structure only, do NOT copy values):
+[
+  {
+    "head": "Patient:123456",
+    "head_type": "Patient",
+    "relation": "Patient–Disease",
+    "tail": "Disease:Diabetes Mellitus",
+    "tail_type": "Disease",
+    "timestamp": "2024-05-01",
+    "source": "PubMed"
+  }
+]
+"""
 
-    # 7) Post-process: strip prefix before ':' in head and tail
-    cleaned = []
-    for t in triples:
-        h = t.get('head', '')
-        ta = t.get('tail', '')
-        t['head'] = h.split(':', 1)[1] if ':' in h else h
-        t['tail'] = ta.split(':', 1)[1] if ':' in ta else ta
-        cleaned.append(t)
-    return cleaned
+    model = genai.GenerativeModel(MODEL_ID)
+    all_triples: List[Dict] = []
 
+    for i in range(0, len(abstracts), batch_size):
+        batch = abstracts[i : i + batch_size]
+        abstracts_txt = "\n\n---\n\n".join(batch)
+        user_prompt = f"""Patient Context:
+PatientID: {patient_id}
+{patient_context}
 
-# Quick CLI Test
-if __name__ == "__main__":
-    ctx = (
-        "PatientID: P123456; Visit: 2025-06-01; Diagnoses: I10, E11.9; "
-        "Medications: 2025-06-02 Lisinopril (C09AA02); "
-        "Labs: BP=160/95, Glu=180 mg/dL; SideEffect: Dizziness 2025-06-05; Severity: ICU"
-    )
-    abs_list = ["Lisinopril lowered BP by 15 mmHg in hypertension patients."]
-    triples = generate_triples_local_llama2(ctx, abs_list, None)
-    print("=== Triples ===")
-    for t in triples:
-        print(t)
+PubMed Abstracts:
+{abstracts_txt}
+
+Instructions:
+1. For each abstract, extract exactly 3 triples (Symptom/Lab, Treatment/Procedure, AdverseEffect).
+2. Use entities **only from the patient context or the abstracts**—do NOT hallucinate or invent values.
+3. Use the PatientID only if the abstract clearly refers to the patient’s condition or treatment.
+4. Output a clean JSON array, no explanations or markdown.
+"""
+
+        raw = ""
+        # 三次重試機制
+        for attempt in range(1):
+            try:
+                resp = model.generate_content(
+                    contents=[
+                        {"role": "model", "parts": [{"text": sys_prompt}]},
+                        {"role": "user",  "parts": [{"text": user_prompt}]},
+                    ],
+                    generation_config={
+                        "temperature": 0.0,
+                        "max_output_tokens": max_output_tokens,
+                    },
+                )
+                raw = resp.text
+                break
+            except GoogleAPIError as e:
+                msg = str(e).lower()
+                if e.code == 429 or "quota" in msg:
+                    print(f"[WARN] Gemma batch {i//batch_size+1} quota hit, retry {attempt+1}/3 after 3s")
+                    time.sleep(1)
+                    continue
+                print(f"[ERROR] Gemma batch {i//batch_size+1} error: {e}")
+                break
+            except Exception as e:
+                print(f"[WARN] Gemma batch {i//batch_size+1} unexpected: {e}")
+                break
+        else:
+            print(f"[ERROR] Gemma batch {i//batch_size+1} failed 3 times, skip")
+            continue
+
+        time.sleep(1)
+        triples = _extract_json(raw)
+        for t in triples:
+            # 淨化欄位
+            t["source"] = "RAG"
+            t["head"] = t.get("head", patient_id).split(":",1)[-1]
+            t["tail"] = t.get("tail", "").split(":",1)[-1]
+        all_triples.extend(triples)
+
+    return all_triples
 
