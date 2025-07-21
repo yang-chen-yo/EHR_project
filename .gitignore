@@ -1,0 +1,8 @@
+retrieval_cache/
+triples_output/
+checkpoints/
+# 忽略編譯檔與快取
+__pycache__/
+*.pyc
+# 若 .env 檔存放敏感資訊
+.env

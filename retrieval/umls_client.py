@@ -21,9 +21,9 @@ class UMLSClient:
     同時支援載入 UMLS 關係三元組 (relation triples CSV)。
 
     靜態文件:
-      - concept.txt
-      - concept_name.txt
-      - relation.txt
+      - concepts.txt
+      - concept_names.txt
+      - relations.txt
       - umls.csv (關係三元組: relation\tCUI1\tCUI2\tweight)
     動態 code→CUI:
       - 使用 Spark NLP icd10cm_umls_mapping pipeline 或注入自訂 pipeline
@@ -78,7 +78,7 @@ class UMLSClient:
         if os.path.exists(cache):
             with open(cache, 'rb') as f:
                 return pickle.load(f)
-        path = os.path.join(self.umls_dir, 'concept.txt')
+        path = os.path.join(self.umls_dir, 'concepts.txt')
         cuis = []
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -94,7 +94,7 @@ class UMLSClient:
         if os.path.exists(cache):
             with open(cache, 'rb') as f:
                 return pickle.load(f)
-        path = os.path.join(self.umls_dir, 'concept_name.txt')
+        path = os.path.join(self.umls_dir, 'concept_names.txt')
         mapping: Dict[str, str] = {}
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -111,7 +111,7 @@ class UMLSClient:
         if os.path.exists(cache):
             with open(cache, 'rb') as f:
                 return pickle.load(f)
-        path = os.path.join(self.umls_dir, 'relation.txt')
+        path = os.path.join(self.umls_dir, 'relations.txt')
         types: List[str] = []
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:

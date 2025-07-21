@@ -58,12 +58,26 @@ def pad_and_convert(visits, max_visits, max_nodes):
         padded.append(torch.zeros(max_nodes, dtype=torch.float))
     return torch.stack(padded, dim=0)
 
+
 def preprocess_samples(dataset):
     """
-    Preprocess all samples in the given dataset (iterable) and return a list.
+    重新將 PyHealth 回傳的 record 轉成符合 enrich_sample_with_names
+    的格式：所有欄位皆為 List[List[str]]。
     """
     samples = []
     for record in tqdm(dataset, desc="Preprocessing samples"):
-        samples.append(record)
+        sample = {
+            'visit_id':   record['visit_id'],
+            'patient_id': record['patient_id'],
+            'visit_date':  record.get('visit_date', ''),
+            # 用 conditions_all（或原 record['conditions']）並包成雙層 list
+            'conditions': [record.get('conditions_all', record['conditions'])],
+            # 同 procedures
+            'procedures': [record.get('procedures_all', record['procedures'])],
+            # **重點**：用 drugs_all 而非 record['drugs']
+            'drugs':      [record.get('drugs_all', record['drugs'])],
+            # 若有 label 則取出
+            'label':      record.get('label')
+        }
+        samples.append(sample)
     return samples
-
